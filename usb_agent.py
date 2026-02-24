@@ -86,8 +86,8 @@ def run_powershell(cmd: str, check: bool = True) -> subprocess.CompletedProcess:
 
 
 def run_bash(subcmd: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    """Execute usb_mount.sh subcommand."""
-    return run(["sudo", "bash", str(BASH_SCRIPT), subcmd, *args], check=check)
+    """Execute usb_mount.sh subcommand with output streamed to terminal."""
+    return run(["sudo", "bash", str(BASH_SCRIPT), subcmd, *args], check=check, capture=False)
 
 
 def win_to_wsl_path(win_path: str) -> str:
@@ -179,7 +179,21 @@ def usbipd_attach(busid: str) -> None:
         run_powershell(f"usbipd attach --wsl --busid {busid}")
     # Give WSL time to recognize the device
     log.info("Waiting for WSL to detect device...")
-    time.sleep(3)
+    for i in range(10):
+        time.sleep(2)
+        # Check if device appeared via lsblk
+        check = subprocess.run(
+            ["lsblk", "-dno", "NAME,RM"],
+            capture_output=True, text=True,
+        )
+        if check.returncode == 0:
+            for line in check.stdout.splitlines():
+                parts = line.split()
+                if len(parts) == 2 and parts[1] == "1":
+                    log.info(f"Device detected in WSL: /dev/{parts[0]}")
+                    return
+        log.info(f"  Waiting... ({(i+1)*2}s)")
+    log.warning("Device may not be fully ready — proceeding anyway")
 
 
 def usbipd_detach(busid: str) -> None:
@@ -221,13 +235,13 @@ def copy_file(src: str, dst: str) -> None:
     """Copy file using rsync with progress and resume support."""
     log.info(f"Copying: {src} → {dst}")
 
-    # Ensure destination directory exists
+    # Ensure destination directory exists (needs sudo for USB mount)
     dst_dir = os.path.dirname(dst)
-    if dst_dir:
-        os.makedirs(dst_dir, exist_ok=True)
+    if dst_dir and not os.path.isdir(dst_dir):
+        run(["sudo", "mkdir", "-p", dst_dir])
 
     run(
-        ["rsync", "-ah", "--progress", "--partial", "--info=progress2", src, dst],
+        ["sudo", "rsync", "-ah", "--progress", "--partial", "--info=progress2", src, dst],
         capture=False,  # Let progress output show in terminal
     )
     log.info("Copy complete")
@@ -442,8 +456,17 @@ def workflow_to_usb(filepath: str, usb_dest: str = "", skip_verify: bool = False
     else:
         log.info("Device already attached to WSL")
 
-    # Step 2: Mount
-    run_bash("mount")
+    # Step 2: Mount (retry up to 3 times — device may need time to appear)
+    for attempt in range(1, 4):
+        result = run_bash("mount", check=False)
+        if result.returncode == 0:
+            break
+        log.warning(f"Mount attempt {attempt}/3 failed — retrying in 3s...")
+        time.sleep(3)
+    else:
+        log.error("Failed to mount USB after 3 attempts")
+        teardown(busid)
+        sys.exit(1)
 
     # Step 3: Determine destination path on USB
     if usb_dest:
