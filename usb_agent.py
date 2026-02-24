@@ -81,6 +81,24 @@ def run_bash(subcmd: str, *args: str, check: bool = True) -> subprocess.Complete
     return run(["sudo", "bash", str(BASH_SCRIPT), subcmd, *args], check=check)
 
 
+def win_to_wsl_path(win_path: str) -> str:
+    """Convert a Windows path to WSL path.
+
+    C:\\Users\\Civ Robotics\\file.gz → /mnt/c/Users/Civ Robotics/file.gz
+    """
+    path = win_path.strip().strip('"').strip("'")
+    # Already a Linux path
+    if path.startswith("/"):
+        return path
+    # Convert backslashes
+    path = path.replace("\\", "/")
+    # Convert drive letter: C:/... → /mnt/c/...
+    if len(path) >= 2 and path[1] == ":":
+        drive = path[0].lower()
+        path = f"/mnt/{drive}{path[2:]}"
+    return path
+
+
 # ---------------------------------------------------------------------------
 # USBIPD Integration (Windows ↔ WSL)
 # ---------------------------------------------------------------------------
@@ -364,16 +382,32 @@ def workflow_from_usb(filename: str, dest_dir: str, skip_verify: bool = False) -
     log.info("=" * 60)
 
 
-def workflow_to_usb(filepath: str, skip_verify: bool = False) -> None:
-    """Copy a file TO the USB from the local filesystem."""
+def workflow_to_usb(filepath: str, usb_dest: str = "", skip_verify: bool = False) -> None:
+    """Copy a file TO the USB from the local/Windows filesystem.
+
+    Args:
+        filepath: Source path (Windows or WSL path — auto-converted)
+        usb_dest: Subdirectory on USB relative to mount point (e.g. "home/compulab")
+        skip_verify: Skip SHA256 check
+    """
+    # Auto-convert Windows paths
+    filepath = win_to_wsl_path(filepath)
+
     log.info("=" * 60)
     log.info(f"WORKFLOW: Copy TO USB ← local")
-    log.info(f"  File: {filepath}")
+    log.info(f"  Source: {filepath}")
+    if usb_dest:
+        log.info(f"  USB dest: {MOUNT_POINT}/{usb_dest}")
     log.info("=" * 60)
 
     if not os.path.exists(filepath):
         log.error(f"Source file not found: {filepath}")
+        log.error("If this is a Windows path, make sure the drive is accessible in WSL.")
+        log.error(f"  Tried: {filepath}")
         sys.exit(1)
+
+    src_size = os.path.getsize(filepath)
+    log.info(f"Source file size: {_human_size(src_size)}")
 
     # Step 1: Detect and attach
     devices = usbipd_list()
@@ -393,11 +427,30 @@ def workflow_to_usb(filepath: str, skip_verify: bool = False) -> None:
     # Step 2: Mount
     run_bash("mount")
 
-    # Step 3: Copy
-    dst_path = os.path.join(MOUNT_POINT, os.path.basename(filepath))
+    # Step 3: Determine destination path on USB
+    if usb_dest:
+        dest_dir = os.path.join(MOUNT_POINT, usb_dest.strip("/"))
+    else:
+        dest_dir = MOUNT_POINT
+
+    # Verify the destination directory exists on USB
+    if not os.path.isdir(dest_dir):
+        log.warning(f"Destination directory does not exist: {dest_dir}")
+        log.info(f"Creating: {dest_dir}")
+        run(["sudo", "mkdir", "-p", dest_dir])
+
+    dst_path = os.path.join(dest_dir, os.path.basename(filepath))
+
+    # Check if file already exists on USB
+    if os.path.exists(dst_path):
+        existing_size = os.path.getsize(dst_path)
+        log.warning(f"File already exists on USB: {dst_path} ({_human_size(existing_size)})")
+        log.info("rsync will overwrite/update it")
+
+    # Step 4: Copy
     copy_file(filepath, dst_path)
 
-    # Step 4: Verify
+    # Step 5: Verify
     if skip_verify:
         log.info("Skipping verification (--skip-verify)")
     elif not verify_copy(filepath, dst_path):
@@ -405,10 +458,11 @@ def workflow_to_usb(filepath: str, skip_verify: bool = False) -> None:
         teardown(busid)
         sys.exit(1)
 
-    # Step 5: Teardown
+    # Step 6: Teardown
     teardown(busid)
     log.info("=" * 60)
-    log.info(f"SUCCESS: {filepath} → {dst_path}")
+    log.info(f"SUCCESS: {filepath}")
+    log.info(f"     →   {dst_path}")
     parsed = parse_civnav_name(os.path.basename(filepath))
     if parsed:
         log.info(f"  Date: {parsed['date_formatted']}  SW: {parsed['sw_version']}  HW: {parsed['hw_version']}  Unit: {parsed['unit']}")
@@ -537,41 +591,36 @@ def main():
     parser = argparse.ArgumentParser(
         description="WSL USB Automation Agent — zero manual USB commands",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog=r"""
 CivNav image naming: civnav_{MMDDYYYY}_{SW}_{HW}_{UNIT}.img.gz
   Example: civnav_02232026_1.2.9_2.1.1_003.img.gz
 
 Examples:
+  # Deploy image from Windows Desktop to USB (your main use case)
+  python3 usb_agent.py --to-usb "C:\Users\Civ Robotics\Desktop\civnav\civnav_02232026_1.2.9_2.1.1_003.img.gz" --usb-dest home/compulab
+
+  # Same thing with WSL path
+  python3 usb_agent.py --to-usb "/mnt/c/Users/Civ Robotics/Desktop/civnav/civnav_02232026_1.2.9_2.1.1_003.img.gz" --usb-dest home/compulab
+
+  # Copy to USB root (no --usb-dest)
+  python3 usb_agent.py --to-usb civnav_02232026_1.2.9_2.1.1_003.img.gz
+
   # Copy specific image FROM USB
   python3 usb_agent.py --from-usb civnav_02232026_1.2.9_2.1.1_003.img.gz
-
-  # Copy FROM USB to specific directory
-  python3 usb_agent.py --from-usb civnav_02232026_1.2.9_2.1.1_003.img.gz --dest ~/images/
 
   # Auto-grab the latest CivNav image from USB
   python3 usb_agent.py --latest
 
-  # Latest image for a specific unit
-  python3 usb_agent.py --latest --unit 003
-
   # List all CivNav images on USB
   python3 usb_agent.py --list-images
 
-  # Copy file TO USB
-  python3 usb_agent.py --to-usb /path/to/civnav_02232026_1.2.9_2.1.1_003.img.gz
-
   # Check status
   python3 usb_agent.py --status
-
-  # Just mount (browse manually)
-  python3 usb_agent.py --mount-only
-
-  # Safely unmount and detach
-  python3 usb_agent.py --unmount-only
         """,
     )
     parser.add_argument("--from-usb", metavar="FILENAME", help="Copy specific file FROM USB to local")
-    parser.add_argument("--to-usb", metavar="FILEPATH", help="Copy file TO USB from local")
+    parser.add_argument("--to-usb", metavar="FILEPATH", help="Copy file TO USB (accepts Windows or WSL paths)")
+    parser.add_argument("--usb-dest", metavar="PATH", default="", help="Destination dir ON the USB, relative to mount (e.g. home/compulab)")
     parser.add_argument("--dest", default=".", help="Destination directory for --from-usb/--latest (default: cwd)")
     parser.add_argument("--latest", action="store_true", help="Auto-detect and copy the latest CivNav image from USB")
     parser.add_argument("--unit", metavar="NUM", help="Filter by unit number (e.g. 003) — used with --latest")
@@ -611,7 +660,7 @@ Examples:
     elif args.from_usb:
         workflow_from_usb(args.from_usb, os.path.abspath(args.dest), args.skip_verify)
     elif args.to_usb:
-        workflow_to_usb(os.path.abspath(args.to_usb), args.skip_verify)
+        workflow_to_usb(args.to_usb, args.usb_dest, args.skip_verify)
     else:
         parser.print_help()
         sys.exit(1)

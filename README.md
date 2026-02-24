@@ -29,34 +29,43 @@ Example: `civnav_02232026_1.2.9_2.1.1_003.img.gz`
 
 ## Quick Start
 
+**Deploy image from Windows to USB (main use case):**
 ```bash
-# Copy specific image FROM USB
+python3 usb_agent.py \
+  --to-usb "C:\Users\Civ Robotics\Desktop\civnav\civnav_02232026_1.2.9_2.1.1_003.img.gz" \
+  --usb-dest home/compulab
+```
+
+This will:
+1. Auto-detect + attach USB via usbipd
+2. Mount the ext4 partition to `/mnt/usb`
+3. Copy the image to `/mnt/usb/home/compulab/civnav_02232026_1.2.9_2.1.1_003.img.gz`
+4. Verify SHA256
+5. Safely unmount + detach
+
+**Other commands:**
+```bash
+# Copy FROM USB to local
 python3 usb_agent.py --from-usb civnav_02232026_1.2.9_2.1.1_003.img.gz
 
-# Copy to specific directory
-python3 usb_agent.py --from-usb civnav_02232026_1.2.9_2.1.1_003.img.gz --dest ~/images/
-
-# Auto-grab the latest CivNav image
+# Auto-grab the latest CivNav image from USB
 python3 usb_agent.py --latest
-
-# Latest image for unit 003 only
-python3 usb_agent.py --latest --unit 003
 
 # List all CivNav images on USB
 python3 usb_agent.py --list-images
 
-# Copy file TO USB
-python3 usb_agent.py --to-usb /path/to/civnav_02232026_1.2.9_2.1.1_003.img.gz
-
 # Check status
 python3 usb_agent.py --status
 
-# Mount USB only (browse files manually)
+# Mount only (browse manually)
 python3 usb_agent.py --mount-only
 
 # Safely unmount and detach
 python3 usb_agent.py --unmount-only
 ```
+
+**Windows paths are auto-converted:**
+`C:\Users\Civ Robotics\...` becomes `/mnt/c/Users/Civ Robotics/...`
 
 ## What Happens
 
