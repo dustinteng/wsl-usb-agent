@@ -29,6 +29,15 @@ CIVNAV_PATTERN = re.compile(
     r"^civnav_(\d{8})_(\d+\.\d+\.\d+)_(\d+\.\d+\.\d+)_(\d+)\.img\.gz$"
 )
 
+# usbipd list line: BUSID  VID:PID  DEVICE (with spaces)  STATE
+# Example: 2-14   21c4:0cd1  USB Mass Storage Device                   Not shared
+USBIPD_LINE = re.compile(
+    r"^(\d+-\d+)\s+"                    # BUSID
+    r"([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\s+"  # VID:PID
+    r"(.+?)\s{2,}"                      # DEVICE (greedy until 2+ spaces)
+    r"(Not shared|Shared|Attached.*)$"  # STATE
+)
+
 LOG_DIR.mkdir(exist_ok=True)
 
 # ---------------------------------------------------------------------------
@@ -112,18 +121,27 @@ def usbipd_list() -> list[dict]:
     devices = []
     for line in result.stdout.splitlines():
         line = line.strip()
-        # Skip header/separator lines
-        if not line or line.startswith("BUSID") or line.startswith("---") or line.startswith("Connected"):
+        # Skip header/separator/section lines
+        if not line or line.startswith("BUSID") or line.startswith("---"):
             continue
-        # Format: BUSID  VID:PID  DEVICE  STATE
-        parts = line.split(None, 3)
-        if len(parts) >= 3:
+        if line.startswith("Connected") or line.startswith("Persisted") or line.startswith("GUID"):
+            continue
+
+        # Use regex to properly parse lines with multi-word device names
+        match = USBIPD_LINE.match(line)
+        if match:
+            busid, vidpid, description, state = match.groups()
             devices.append({
-                "busid": parts[0],
-                "vidpid": parts[1] if len(parts) > 1 else "",
-                "description": parts[2] if len(parts) > 2 else "",
-                "state": parts[3].strip() if len(parts) > 3 else "",
+                "busid": busid,
+                "vidpid": vidpid,
+                "description": description.strip(),
+                "state": state.strip(),
             })
+            log.info(f"  Device: {busid}  {vidpid}  {description.strip()}  [{state.strip()}]")
+
+    if not devices:
+        log.warning("No devices parsed from usbipd list")
+
     return devices
 
 
